@@ -1,206 +1,144 @@
 import { createWorkersAI } from "workers-ai-provider";
-import { callable, routeAgentRequest, type Schedule } from "agents";
-import { getSchedulePrompt, scheduleSchema } from "agents/schedule";
+import { routeAgentRequest } from "agents";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import {
   convertToModelMessages,
-  pruneMessages,
+  simulateStreamingMiddleware,
   stepCountIs,
   streamText,
-  tool
+  tool,
+  wrapLanguageModel
 } from "ai";
 import { z } from "zod";
+import {
+  localDate,
+  normalizeExercise,
+  suggestNext,
+  summarizeMonth,
+  type WorkoutEntry,
+  type WorkoutState
+} from "./workouts";
 
-export class ChatAgent extends AIChatAgent<Env> {
+// Requirement 1 — LLM: Llama 3.3 on Workers AI (free-tier model from the account catalog).
+const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
+/**
+ * Requirement 2 — Coordination: the single Agent class (one Durable Object per
+ * user, addressed by name from the client). It owns the chat, the tools and
+ * the training history; there is no separate Workflow.
+ *
+ * Requirement 4 — Memory/state: training history lives in the agent's state
+ * (`initialState` / `this.setState`). The Durable Object persists it and syncs
+ * it to connected clients, so reopening the app restores everything.
+ */
+export class WorkoutAgent extends AIChatAgent<Env, WorkoutState> {
+  initialState: WorkoutState = { workouts: [] };
   maxPersistedMessages = 100;
-  chatRecovery = true;
-  // Wait for MCP connections to be re-established after hibernation before
-  // processing a message, so MCP tools aren't intermittently missing.
-  waitForMcpConnections = true;
-
-  onStart() {
-    // Configure OAuth popup behavior for MCP servers that require authentication
-    this.mcp.configureOAuthCallback({
-      customHandler: (result) => {
-        if (result.authSuccess) {
-          return new Response("<script>window.close();</script>", {
-            headers: { "content-type": "text/html" },
-            status: 200
-          });
-        }
-        return new Response(
-          `Authentication Failed: ${result.authError || "Unknown error"}`,
-          { headers: { "content-type": "text/plain" }, status: 400 }
-        );
-      }
-    });
-  }
-
-  @callable()
-  async addServer(name: string, url: string) {
-    return await this.addMcpServer(name, url);
-  }
-
-  @callable()
-  async removeServer(serverId: string) {
-    await this.removeMcpServer(serverId);
-  }
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
-    const mcpTools = this.mcp.getAITools();
+    const timezone = options?.body?.timezone as string | undefined;
+    const today = localDate(timezone);
+    const known = [...new Set(this.state.workouts.map((w) => w.exercise))];
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
-        sessionAffinity: this.sessionAffinity
+      // workers-ai-provider 3.3.1 duplicates every streamed tool-argument delta
+      // for Llama 3.3, which corrupts tool input JSON. Generate non-streamed
+      // (complete tool calls) and replay the result as a stream instead.
+      model: wrapLanguageModel({
+        model: workersai(MODEL),
+        middleware: simulateStreamingMiddleware()
       }),
-      system: `You are a helpful assistant that can understand images. You can check the weather, get the user's timezone, run calculations, and schedule tasks. When users share images, describe what you see and answer questions about them.
+      maxOutputTokens: 1024,
+      system: `You are a concise strength-training coach inside a workout log app.
+Today is ${today}. Weights are in kg.
 
-${getSchedulePrompt({ date: new Date() })}
+Logging format is WEIGHT x SETS x REPS (weight first, then sets, then reps):
+- "bench 60x5x5" = bench press, 60 kg, 5 sets, 5 reps
+- "rows 50x8x3" = barbell row, 50 kg, 8 sets, 3 reps
+Dates like "yesterday" or "on monday" are relative to today; use YYYY-MM-DD.
+Exercises already logged: ${known.length ? known.join(", ") : "none yet"}. Reuse these exact names for the same lift.
 
-If the user asks to schedule a task, use the schedule tool to schedule the task.`,
-      // Prune old tool calls and reasoning to save tokens on long conversations
-      messages: pruneMessages({
-        messages: await convertToModelMessages(this.messages),
-        toolCalls: "before-last-2-messages",
-        reasoning: "before-last-message"
-      }),
+Tools:
+- logWorkout: ONLY when the user reports sets they did. Log every exercise in one call, then confirm in one short sentence what was saved.
+- suggestNextSession: when the user asks for their next session, e.g. "what's next", "what's next?", "next workout", "what should I do today", "plan my next session". Present each exercise's "next" exactly as returned (do not change the numbers). Mention only the lifts listed in "priorities", if any.
+- reviewMonth: when the user asks for a review, e.g. "review my month", "how was my month", "monthly summary". Write a short summary: volume trend across weeks, the PRs listed in "prs" (if the list is empty, say there are no PRs yet), and 2-3 things to push next month. Use only the facts returned.
+For greetings or general questions, answer directly without calling a tool.`,
+      // Only the latest user message goes to the model. Training history lives
+      // in agent state (read by the tools), and replaying earlier turns made
+      // Llama re-log old workouts and echo past tool calls. It also keeps the
+      // prompt well inside the model's 24k context window.
+      messages: await convertToModelMessages(this.messages.slice(-1)),
       tools: {
-        // MCP tools from connected servers
-        ...mcpTools,
-
-        // Server-side tool: runs automatically on the server
-        getWeather: tool({
-          description: "Get the current weather for a city",
+        logWorkout: tool({
+          description:
+            "Save one or more performed exercises to the user's training history.",
           inputSchema: z.object({
-            city: z.string().describe("City name")
+            entries: z.array(
+              z.object({
+                exercise: z
+                  .string()
+                  .describe("Exercise name, e.g. bench press"),
+                weight: z.number().describe("Weight in kg (0 for bodyweight)"),
+                sets: z.number().int().positive().describe("Number of sets"),
+                reps: z.number().int().positive().describe("Reps per set"),
+                date: z
+                  .string()
+                  .optional()
+                  .describe("YYYY-MM-DD; omit for today")
+              })
+            )
           }),
-          execute: async ({ city }) => {
-            // Replace with a real weather API in production
-            const conditions = ["sunny", "cloudy", "rainy", "snowy"];
-            const temp = Math.floor(Math.random() * 30) + 5;
-            return {
-              city,
-              temperature: temp,
-              condition:
-                conditions[Math.floor(Math.random() * conditions.length)],
-              unit: "celsius"
-            };
+          execute: async ({ entries }) => {
+            const saved: WorkoutEntry[] = entries.map((e) => ({
+              id: crypto.randomUUID(),
+              // Accept only well-formed, non-future dates; default to today.
+              date:
+                e.date && /^\d{4}-\d{2}-\d{2}$/.test(e.date) && e.date <= today
+                  ? e.date
+                  : today,
+              exercise: normalizeExercise(e.exercise),
+              weight: e.weight,
+              sets: e.sets,
+              reps: e.reps
+            }));
+            this.setState({ workouts: [...this.state.workouts, ...saved] });
+            return { saved };
           }
         }),
 
-        // Client-side tool: no execute function — the browser handles it
-        getUserTimezone: tool({
+        suggestNextSession: tool({
           description:
-            "Get the user's timezone from their browser. Use this when you need to know the user's local time.",
-          inputSchema: z.object({})
-        }),
-
-        // Approval tool: requires user confirmation before executing
-        calculate: tool({
-          description:
-            "Perform a math calculation with two numbers. Requires user approval for large numbers.",
-          inputSchema: z.object({
-            a: z.number().describe("First number"),
-            b: z.number().describe("Second number"),
-            operator: z
-              .enum(["+", "-", "*", "/", "%"])
-              .describe("Arithmetic operator")
-          }),
-          needsApproval: async ({ a, b }) =>
-            Math.abs(a) > 1000 || Math.abs(b) > 1000,
-          execute: async ({ a, b, operator }) => {
-            const ops: Record<string, (x: number, y: number) => number> = {
-              "+": (x, y) => x + y,
-              "-": (x, y) => x - y,
-              "*": (x, y) => x * y,
-              "/": (x, y) => x / y,
-              "%": (x, y) => x % y
-            };
-            if (operator === "/" && b === 0) {
-              return { error: "Division by zero" };
-            }
-            return {
-              expression: `${a} ${operator} ${b}`,
-              result: ops[operator](a, b)
-            };
-          }
-        }),
-
-        scheduleTask: tool({
-          description:
-            "Schedule a task to be executed at a later time. Use this when the user asks to be reminded or wants something done later.",
-          inputSchema: scheduleSchema,
-          execute: async ({ when, description }) => {
-            if (when.type === "no-schedule") {
-              return "Not a valid schedule input";
-            }
-            const input =
-              when.type === "scheduled"
-                ? when.date
-                : when.type === "delayed"
-                  ? when.delayInSeconds
-                  : when.type === "cron"
-                    ? when.cron
-                    : null;
-            if (!input) return "Invalid schedule type";
-            try {
-              this.schedule(input, "executeTask", description, {
-                idempotent: true
-              });
-              return `Task scheduled: "${description}" (${when.type}: ${input})`;
-            } catch (error) {
-              return `Error scheduling task: ${error}`;
-            }
-          }
-        }),
-
-        getScheduledTasks: tool({
-          description: "List all tasks that have been scheduled",
+            "Get the next session's prescription for every exercise using progressive overload on the user's history.",
           inputSchema: z.object({}),
           execute: async () => {
-            const tasks = this.getSchedules();
-            return tasks.length > 0 ? tasks : "No scheduled tasks found.";
+            const next = suggestNext(this.state.workouts, today);
+            return next.plan.length ? next : "No workouts logged yet.";
           }
         }),
 
-        cancelScheduledTask: tool({
-          description: "Cancel a scheduled task by its ID",
-          inputSchema: z.object({
-            taskId: z.string().describe("The ID of the task to cancel")
-          }),
-          execute: async ({ taskId }) => {
-            try {
-              this.cancelSchedule(taskId);
-              return `Task ${taskId} cancelled.`;
-            } catch (error) {
-              return `Error cancelling task: ${error}`;
-            }
-          }
+        reviewMonth: tool({
+          description:
+            "Get volume trends, PRs and per-exercise stats for the last 30 days.",
+          inputSchema: z.object({}),
+          execute: async () => summarizeMonth(this.state.workouts, today)
         })
       },
-      stopWhen: stepCountIs(20),
+      // One tool call per turn is enough; after it, force a text answer
+      // (Llama otherwise sometimes ends the turn with an empty reply).
+      prepareStep: ({ stepNumber }) =>
+        stepNumber > 0 ? { toolChoice: "none" } : {},
+      stopWhen: stepCountIs(3),
       abortSignal: options?.abortSignal
     });
 
-    return result.toUIMessageStreamResponse();
-  }
-
-  async executeTask(description: string, _task: Schedule<string>) {
-    // Do the actual work here (send email, call API, etc.)
-    console.log(`Executing scheduled task: ${description}`);
-
-    // Notify connected clients via a broadcast event.
-    // We use broadcast() instead of saveMessages() to avoid injecting
-    // into chat history — that would cause the AI to see the notification
-    // as new context and potentially loop.
-    this.broadcast(
-      JSON.stringify({
-        type: "scheduled-task",
-        description,
-        timestamp: new Date().toISOString()
-      })
-    );
+    // Surface real error messages (the default is a generic "An error occurred.").
+    return result.toUIMessageStreamResponse({
+      onError: (error) => {
+        console.error("chat error:", error);
+        return error instanceof Error ? error.message : String(error);
+      }
+    });
   }
 }
 

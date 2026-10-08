@@ -1,8 +1,8 @@
 {
-  "name": "agent-starter",
+  "name": "workout-planner",
   "version": "1.0.0",
   "private": true,
-  "description": "Starter template for building AI chat agents on Cloudflare",
+  "description": "AI workout planner on Cloudflare Agents + Workers AI (Llama 3.3)",
   "keywords": [
     "agents",
     "ai",
@@ -23,7 +23,6 @@
     "@cloudflare/ai-chat": "^0.9.3",
     "@cloudflare/kumo": "^2.6.0",
     "@phosphor-icons/react": "^2.1.10",
-    "@streamdown/code": "^1.1.1",
     "agents": "^0.17.4",
     "ai": "^6.0.197",
     "react": "^19.2.7",

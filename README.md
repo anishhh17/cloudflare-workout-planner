@@ -1,245 +1,81 @@
-# Agent Starter
+# Workout Planner
 
-![npm i agents command](./npm-agents-banner.svg)
+A small AI workout planner on Cloudflare. You log workouts in chat and the agent stores them as structured training history, suggests your next session using progressive overload, and writes a monthly review.
 
-<a href="https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/agents-starter"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare"/></a>
+Built on [`cloudflare/agents-starter`](https://github.com/cloudflare/agents-starter) with the Agents SDK and Workers AI (Llama 3.3). No third-party API keys.
 
-A starter template for building AI chat agents on Cloudflare, powered by the [Agents SDK](https://developers.cloudflare.com/agents/).
+## What it does
 
-Uses Workers AI (no API key required), with tools for weather, timezone detection, calculations with approval, task scheduling, and vision (image input).
+| You say | The agent |
+|---|---|
+| `bench 60x5x5, rows 50x8x3` | Saves each exercise (exercise, weight, sets, reps, date) to its state; the side panel updates live |
+| `yesterday I did squat 100x5x5` | Same, dated yesterday |
+| `what's next?` | Suggests the next session from your history |
+| `review my month` | Summarizes the last 30 days: volume trend, PRs, what to push next month |
 
-## Quick start
+**Notation is `weight x sets x reps`**, in kg. For example, `rows 50x8x3` means 50 kg, 8 sets of 3 reps.
 
-```bash
-npx create-cloudflare@latest --template cloudflare/agents-starter
-cd agents-starter
-npm install
-npm run dev
-```
+**Progressive overload rule.** One rule, the same for every exercise (double progression):
+- under 12 reps last session → same weight and sets, **+1 rep**
+- 12 reps reached → **+2.5 kg**, same sets, **reset to 8 reps**
 
-> **Cloudflare authentication is required to run locally.** This template uses
-> Workers AI with `"ai": { "remote": true }` in `wrangler.jsonc`, and Workers AI
-> has no local simulator — so `npm run dev` opens a remote proxy session against
-> Cloudflare and needs you to be authenticated. Either run `wrangler login` once
-> in an interactive terminal, or set a `CLOUDFLARE_API_TOKEN` environment
-> variable (e.g. in a `.env` file). No third-party (OpenAI/Anthropic) key is
-> needed, but a Cloudflare login is.
+Lifts not trained for more than 7 days are flagged as priorities.
 
-Open [http://localhost:5173](http://localhost:5173) to see your agent in action.
+## How the requirements are met
 
-Try these prompts to see the different features:
+| Requirement | Where |
+|---|---|
+| **1. LLM: Llama 3.3 on Workers AI** | `MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"` in `src/server.ts`. It's the only Llama 3.3 model in the Workers AI catalog (`npx wrangler ai models`), it's available on the Workers Free plan, and it supports function calling. Called through the `AI` binding in `wrangler.jsonc`. |
+| **2. Coordination: a single Agent class, one Durable Object per user** | `WorkoutAgent extends AIChatAgent` in `src/server.ts` is the only coordinator. It receives chat messages, calls the LLM, runs the tools (`logWorkout`, `suggestNextSession`, `reviewMonth`) and updates state. There's no Workflow. The client connects with `useAgent({ agent: "WorkoutAgent", name: userId })`, so each user id maps to its own Durable Object instance. |
+| **3. User input: chat UI** | `src/app.tsx`: the starter's React chat UI trimmed down to a message list, input and a training-history side panel. |
+| **4. Memory/state** | `initialState = { workouts: [] }` and `this.setState(...)` in `WorkoutAgent`. The Durable Object persists the state and syncs it to the browser (`onStateUpdate` fills the side panel). Chat messages are persisted too, so reopening the app restores both. |
 
-- **"What's the weather in Paris?"** — server-side tool (runs automatically)
-- **"What timezone am I in?"** — client-side tool (browser provides the answer)
-- **"Calculate 5000 \* 3"** — approval tool (asks you before running)
-- **"Remind me in 5 minutes to take a break"** — scheduling
-- **Drop an image and ask "What's in this image?"** — vision (image understanding)
+### Design notes
+
+- **The LLM extracts and narrates; the code computes.** The progression rule and the monthly stats (volume per week, per-exercise trend, PRs, Epley e1RM) are plain TypeScript in `src/workouts.ts`. The model turns free text into a tool call and writes the reply around the numbers the tools return. This keeps the numbers correct and testable.
+- **Only the latest message goes to the model.** The training history lives in state, not in the chat transcript. When Llama saw earlier turns, it sometimes re-logged old workouts. Sending one message also keeps the prompt well inside the model's 24k context.
+- **Non-streamed model calls.** `workers-ai-provider@3.3.1` duplicates streamed tool-call argument chunks for Llama 3.3, which corrupts the tool input. The model is wrapped with the AI SDK's `simulateStreamingMiddleware()`, which makes a non-streamed call and replays it as a stream. (Comment in `src/server.ts`.)
+- **Dates use your timezone.** The browser sends its IANA timezone with each message, so "today" and "yesterday" match your local day.
 
 ## Project structure
 
 ```
 src/
-  server.ts    # Chat agent with tools and scheduling
-  app.tsx      # Chat UI built with Kumo components
-  client.tsx   # React entry point
-  styles.css   # Tailwind + Kumo styles
+  server.ts     WorkoutAgent: Durable Object, LLM call, tools, state
+  workouts.ts   Pure logic: types, overload rule, monthly stats
+  app.tsx       Chat UI + training-history side panel
+  client.tsx    React entry
+wrangler.jsonc  Worker config: AI binding, Durable Object + migrations, assets
 ```
 
-## What's included
+## Setup (local)
 
-- **AI Chat** — Streaming responses powered by Workers AI via `AIChatAgent`
-- **Image input** — Drag-and-drop, paste, or click to attach images for vision-capable models
-- **Three tool patterns** — server-side auto-execute, client-side (browser), and human-in-the-loop approval
-- **Scheduling** — one-time, delayed, and recurring (cron) tasks
-- **Reasoning display** — shows model thinking as it streams, collapses when done
-- **Debug mode** — toggle in the header to inspect raw message JSON for each message
-- **Kumo UI** — Cloudflare's design system with dark/light mode
-- **Real-time** — WebSocket connection with automatic reconnection and message persistence
-
-## Making it your own
-
-### Name your project
-
-Update the name in `package.json` and `wrangler.jsonc` — the `name` in `wrangler.jsonc` becomes your deployed Worker's URL (`<name>.<subdomain>.workers.dev`).
-
-### Change the system prompt
-
-Edit the `system` string in `server.ts` to give your agent a different personality or focus area. This is the most impactful single change you can make.
-
-### Replace the demo tools with real ones
-
-The starter ships with demo tools (`getWeather` returns random data, `calculate` does basic arithmetic). Replace them with real implementations:
-
-```ts
-// In server.ts, replace a demo tool with a real API call:
-getWeather: tool({
-  description: "Get the current weather for a city",
-  inputSchema: z.object({ city: z.string() }),
-  execute: async ({ city }) => {
-    const res = await fetch(`https://api.weather.example/${city}`);
-    return res.json();
-  }
-}),
-```
-
-### Add your own tools
-
-Add new tools to the `tools` object in `server.ts`. There are three patterns:
-
-```ts
-// Auto-execute: runs on the server, no user interaction
-myTool: tool({
-  description: "...",
-  inputSchema: z.object({ /* ... */ }),
-  execute: async (input) => { /* return result */ }
-}),
-
-// Client-side: no execute function, browser provides the result
-// Handle it in app.tsx via the onToolCall callback
-browserTool: tool({
-  description: "...",
-  inputSchema: z.object({ /* ... */ })
-}),
-
-// Approval: add needsApproval to gate execution
-sensitiveTool: tool({
-  description: "...",
-  inputSchema: z.object({ /* ... */ }),
-  needsApproval: async (input) => true, // or conditional logic
-  execute: async (input) => { /* runs after approval */ }
-}),
-```
-
-### Customize scheduled task behavior
-
-When a scheduled task fires, `executeTask` runs on the server. It does its work and then uses `this.broadcast()` to notify connected clients (shown as a toast notification in the UI). Replace it with your own logic:
-
-```ts
-async executeTask(description: string, task: Schedule<string>) {
-  // Do the actual work
-  await sendEmail({ to: "user@example.com", subject: description });
-
-  // Notify connected clients
-  this.broadcast(
-    JSON.stringify({ type: "scheduled-task", description, timestamp: new Date().toISOString() })
-  );
-}
-```
-
-> **Why `broadcast()` instead of `saveMessages()`?** Injecting into chat history can cause the AI to see the notification as new context and re-trigger the same task in a loop. `broadcast()` sends a one-off event that the client displays separately from the conversation.
-
-### Remove scheduling
-
-If you don't need scheduling, remove `scheduleTask`, `getScheduledTasks`, and `cancelScheduledTask` from the tools object, the `executeTask` method, and the schedule-related imports (`getSchedulePrompt`, `scheduleSchema`, `Schedule`).
-
-### Add state beyond chat messages
-
-Use `this.setState()` and `this.state` for real-time state that syncs to all connected clients. See [Store and sync state](https://developers.cloudflare.com/agents/api-reference/store-and-sync-state/).
-
-### Add callable methods
-
-Expose agent methods as typed RPC that your client can call directly:
-
-```ts
-import { callable } from "agents";
-
-export class ChatAgent extends AIChatAgent<Env> {
-  @callable()
-  async getStats() {
-    return { messageCount: this.messages.length };
-  }
-}
-
-// Client-side:
-const stats = await agent.call("getStats");
-```
-
-See [Callable methods](https://developers.cloudflare.com/agents/api-reference/callable-methods/).
-
-### Connect to MCP servers
-
-Add external tools from MCP servers:
-
-```ts
-async onChatMessage(onFinish, options) {
-  // Connect to an MCP server
-  await this.mcp.connect("https://my-mcp-server.example/sse");
-
-  const result = streamText({
-    // ...
-    tools: {
-      ...myTools,
-      ...this.mcp.getAITools() // Include MCP tools
-    }
-  });
-}
-```
-
-See [MCP Client API](https://developers.cloudflare.com/agents/api-reference/mcp-client-api/).
-
-## Use a different AI model provider
-
-The starter uses [Workers AI](https://developers.cloudflare.com/workers-ai/) by default (no API key needed). To use a different provider:
-
-### OpenAI
+Requirements: Node.js 20+ and a Cloudflare account (the Workers Free plan is enough).
 
 ```bash
-npm install @ai-sdk/openai
-```
-
-```ts
-// In server.ts, replace the model:
-import { openai } from "@ai-sdk/openai";
-
-// Inside onChatMessage:
-const result = streamText({
-  model: openai("gpt-5.2")
-  // ...
-});
-```
-
-Create a `.env` file with your API key:
-
-```
-OPENAI_API_KEY=your-key-here
-```
-
-### Anthropic
-
-```bash
-npm install @ai-sdk/anthropic
-```
-
-```ts
-import { anthropic } from "@ai-sdk/anthropic";
-
-const result = streamText({
-  model: anthropic("claude-sonnet-4-20250514")
-  // ...
-});
-```
-
-Create a `.env` file with your API key:
-
-```
-ANTHROPIC_API_KEY=your-key-here
+npm install
+npx wrangler login      # Workers AI has no local simulator; dev calls the real model
+npm run dev             # http://localhost:5173
 ```
 
 ## Deploy
 
 ```bash
-npm run deploy
+npm run deploy          # vite build && wrangler deploy
 ```
 
-Your agent is live on Cloudflare's global network. Messages persist in SQLite, streams resume on disconnect, and the agent hibernates when idle.
+Wrangler prints the `*.workers.dev` URL. To watch live logs:
 
-## Learn more
+```bash
+npx wrangler tail
+```
 
-- [Agents SDK documentation](https://developers.cloudflare.com/agents/)
-- [Build a chat agent tutorial](https://developers.cloudflare.com/agents/getting-started/build-a-chat-agent/)
-- [Chat agents API reference](https://developers.cloudflare.com/agents/api-reference/chat-agents/)
-- [Workers AI models](https://developers.cloudflare.com/workers-ai/models/)
+> **Migration note:** this project started from the starter's `ChatAgent` class (migration `v1`). Migration `v2` in `wrangler.jsonc` renames it to `WorkoutAgent`, so already-deployed instances keep their data. On a brand-new deploy both migrations simply apply in order.
 
-## License
+After changing bindings in `wrangler.jsonc`, regenerate types with `npm run types`.
 
-MIT
+## Limitations
+
+- **No authentication.** The user id is a random UUID stored in the browser's `localStorage`. Another browser or a private window is a different user with an empty history. Real auth would put an authenticated user id into `name` instead.
+- **No edit or delete of logged entries.** If the model mis-parses a log, the entry stays.
+- **Weights are in kg only.**
