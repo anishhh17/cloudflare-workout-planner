@@ -6,16 +6,17 @@ Built on [`cloudflare/agents-starter`](https://github.com/cloudflare/agents-star
 
 ## What it does
 
-| You say | The agent |
-|---|---|
-| `bench 60x5x5, rows 50x8x3` | Saves each exercise (exercise, weight, sets, reps, date) to its state; the side panel updates live |
-| `yesterday I did squat 100x5x5` | Same, dated yesterday |
-| `what's next?` | Suggests the next session from your history |
-| `review my month` | Summarizes the last 30 days: volume trend, PRs, what to push next month |
+| You say                         | The agent                                                                                          |
+| ------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `bench 60x5x5, rows 50x8x3`     | Saves each exercise (exercise, weight, sets, reps, date) to its state; the side panel updates live |
+| `yesterday I did squat 100x5x5` | Same, dated yesterday                                                                              |
+| `what's next?`                  | Suggests the next session from your history                                                        |
+| `review my month`               | Summarizes the last 30 days: volume trend, PRs, what to push next month                            |
 
 **Notation is `weight x sets x reps`**, in kg. For example, `rows 50x8x3` means 50 kg, 8 sets of 3 reps.
 
 **Progressive overload rule.** One rule, the same for every exercise (double progression):
+
 - under 12 reps last session → same weight and sets, **+1 rep**
 - 12 reps reached → **+2.5 kg**, same sets, **reset to 8 reps**
 
@@ -23,12 +24,12 @@ Lifts not trained for more than 7 days are flagged as priorities.
 
 ## How the requirements are met
 
-| Requirement | Where |
-|---|---|
-| **1. LLM: Llama 3.3 on Workers AI** | `MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"` in `src/server.ts`. It's the only Llama 3.3 model in the Workers AI catalog (`npx wrangler ai models`), it's available on the Workers Free plan, and it supports function calling. Called through the `AI` binding in `wrangler.jsonc`. |
+| Requirement                                                            | Where                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1. LLM: Llama 3.3 on Workers AI**                                    | `MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"` in `src/server.ts`. It's the only Llama 3.3 model in the Workers AI catalog (`npx wrangler ai models`), it's available on the Workers Free plan, and it supports function calling. Called through the `AI` binding in `wrangler.jsonc`.                                                                               |
 | **2. Coordination: a single Agent class, one Durable Object per user** | `WorkoutAgent extends AIChatAgent` in `src/server.ts` is the only coordinator. It receives chat messages, calls the LLM, runs the tools (`logWorkout`, `suggestNextSession`, `reviewMonth`) and updates state. There's no Workflow. The client connects with `useAgent({ agent: "WorkoutAgent", name: userId })`, so each user id maps to its own Durable Object instance. |
-| **3. User input: chat UI** | `src/app.tsx`: the starter's React chat UI trimmed down to a message list, input and a training-history side panel. |
-| **4. Memory/state** | `initialState = { workouts: [] }` and `this.setState(...)` in `WorkoutAgent`. The Durable Object persists the state and syncs it to the browser (`onStateUpdate` fills the side panel). Chat messages are persisted too, so reopening the app restores both. |
+| **3. User input: chat UI**                                             | `src/app.tsx`: the starter's React chat UI trimmed down to a message list, input and a training-history side panel.                                                                                                                                                                                                                                                        |
+| **4. Memory/state**                                                    | `initialState = { workouts: [] }` and `this.setState(...)` in `WorkoutAgent`. The Durable Object persists the state and syncs it to the browser (`onStateUpdate` fills the side panel). Chat messages are persisted too, so reopening the app restores both.                                                                                                               |
 
 ### Design notes
 

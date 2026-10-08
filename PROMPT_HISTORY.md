@@ -26,7 +26,7 @@ the starter deployed fine and the UI loads, websocket connects, but the agent ne
 
 **Claude:** Protocol constants live elsewhere; rather than reverse-engineer it, I'll reproduce through the real UI in Chrome.
 
-- ToolSearch: select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome …
+- ToolSearch: select:mcp**claude-in-chrome**tabs_context_mcp,mcp**claude-in-chrome**navigate,mcp\_\_claude-in-chrome …
 - Browser (tabs_context_mcp)
 - Browser (navigate): https://throbbing-shape-a655.anishsurendra7.workers.dev
 - Browser (find)
@@ -75,7 +75,7 @@ the starter deployed fine and the UI loads, websocket connects, but the agent ne
 
 **Claude:** Every event's outcome is `ok`. I'll read the page text to see whether a final assistant message rendered below the tool cards.
 
-- ToolSearch: select:mcp__claude-in-chrome__get_page_text,mcp__claude-in-chrome__tabs_close_mcp
+- ToolSearch: select:mcp**claude-in-chrome**get_page_text,mcp**claude-in-chrome**tabs_close_mcp
 - Browser (get_page_text)
 - Bash: `grep -n "confirm(\|clearHistory\|alert(" src/app.tsx`
 - Browser (find)
@@ -94,25 +94,31 @@ the starter deployed fine and the UI loads, websocket connects, but the agent ne
 **Claude:** The agent replies now. The starter was calling a Workers AI model that your account isn't allowed to use, so I switched it to one that is and redeployed.
 
 **What `wrangler tail` showed** when I sent a message:
+
 ```
 AI_APICallError: 5035: Model @cf/moonshotai/kimi-k2.7-code is not available on
 the Workers Free plan. Upgrade to access this model
 ```
+
 The model call failed, but the chat UI never shows the error message the server sends back, which is why it looked like a silent failure.
 
 **Fix:** a one-line change at `src/server.ts:54`:
+
 ```diff
 - model: workersai("@cf/moonshotai/kimi-k2.7-code", {
 + model: workersai("@cf/qwen/qwen3.8-27b", {
 ```
+
 The Workers AI pricing page lists `kimi-k2.7-code` as requiring a paid billing method; `qwen3.8-27b` isn't on that list. I chose `qwen3.8-27b` because it still handles tool calls and images, which the starter's tools and image prompt rely on.
 
 **Checked:**
+
 - The type-check passes.
 - I deployed it (version `9b208ade…`); the tail showed no errors after that.
 - In the live UI, I cleared the chat and resent your Malleshwaram weather question. The agent reasoned, called `getWeather`, and answered in text.
 
 **Things to know:**
+
 - **Image input not tested:** I only sent text, so pasting an image hasn't been tried with the new model.
 - **Old chats:** the messages from before the fix were still saved in the agent's storage. After the redeploy, that old history replayed and showed two tool cards with no final reply. Hitting **Clear** fixed it, so anyone else who used the old version may need to do the same.
 - **If you upgrade to Workers Paid,** you can switch back to `kimi-k2.7-code` by reverting that one line.
@@ -128,12 +134,14 @@ The Workers AI pricing page lists `kimi-k2.7-code` as requiring a paid billing m
 Build a small "workout planner" AI app on Cloudflare for a job assignment. The starter is already scaffolded and deployed from cloudflare/agents-starter.
 
 Requirements (all must be clearly visible in the code):
+
 1. LLM: Llama 3.3 on Workers AI - check my catalog for the exact free-tier model ID and use that (current model is a placeholder).
 2. Coordination: a single Agent class (Agents SDK, one Durable Object per user) that orchestrates everything. No separate Workflow.
 3. User input: a simple chat UI (the starter's frontend is fine, trim it down).
 4. Memory/state: the agent's state holds my training history, so reopening restores everything.
 
 Behavior:
+
 - I log workouts in chat ("bench 60x5x5, rows 50x8x3"). The agent extracts them into structured state (exercise, weight, sets, reps, date) shown in a side panel.
 - When I ask "what's next", it suggests the next session using progressive overload on my history.
 - When I say "review my month", it writes a short summary: volume trends, PRs, what to push next month.
@@ -206,7 +214,7 @@ Constraints: keep it minimal (target ~1-2 hours), remove unused starter features
 
 - Bash: `npm run lint 2>&1 | grep -i "found\|warning\|error" ; S=/private/tmp/claude-501/-Users-anishsurendra-projects-CloudflareProject-throbbing-shape-a655/05c8e988-e2 …`
 - Bash: `npm run dev -- --port 5173 --strictPort`
-- ToolSearch: select:Monitor,mcp__claude-in-chrome__browser_batch
+- ToolSearch: select:Monitor,mcp**claude-in-chrome**browser_batch
 - Bash: `F=/private/tmp/claude-501/-Users-anishsurendra-projects-CloudflareProject-throbbing-shape-a655/05c8e988-e267-49a0-8b9e-fb5b30f5a866/tasks/b8ixf3d3z.output; for …`
 
 **Claude:** The dev server is up. Running the first scenario: log "bench 60x5x5, rows 50x8x3" and check the side panel.
@@ -311,7 +319,7 @@ Constraints: keep it minimal (target ~1-2 hours), remove unused starter features
 
 **Claude:** The page keeps showing that old exchange even after a reload, so Clear and send seem to have no effect in the browser. I'll capture console output from page load and retry a send:
 
-- ToolSearch: select:mcp__claude-in-chrome__javascript_tool,mcp__claude-in-chrome__read_network_requests
+- ToolSearch: select:mcp**claude-in-chrome**javascript_tool,mcp**claude-in-chrome**read_network_requests
 - Browser (javascript_tool): javascript_exec
 - Browser (find)
 - Browser (browser_batch)
@@ -371,12 +379,14 @@ Constraints: keep it minimal (target ~1-2 hours), remove unused starter features
 **Claude:** The workout planner is built and deployed at https://throbbing-shape-a655.anishsurendra7.workers.dev. Logging, "what's next" and "review my month" all work on the live site. Type-check and lint pass, and nothing is committed.
 
 **The four requirements** (the README has a table pointing to each one in the code):
+
 1. **LLM:** `@cf/meta/llama-3.3-70b-instruct-fp8-fast`, the only Llama 3.3 model in your catalog. It works on the free plan and supports tool calls.
 2. **One agent:** `WorkoutAgent` in `src/server.ts` handles everything, with no Workflow. Each browser gets its own Durable Object, picked by a random user id stored in the browser.
 3. **Chat UI:** the starter UI trimmed down, plus a training-history side panel.
 4. **State:** your training history lives in the agent's state, so reopening the page restores both the history and the chat. I checked this by reloading.
 
 **Behavior I verified:**
+
 - `rows 50x8x3` is saved as 50 kg, 8 sets of 3 reps.
 - "yesterday" gets yesterday's date in your timezone.
 - Small talk doesn't trigger a tool call.
@@ -386,12 +396,14 @@ Constraints: keep it minimal (target ~1-2 hours), remove unused starter features
 All the numbers (the overload rule, volumes, PRs) are computed in code in `src/workouts.ts`; the model only turns your message into a tool call and writes the reply around the results.
 
 **Problems I hit while testing, and the fixes:**
+
 - **Every log failed at first.** The Workers AI provider library (`workers-ai-provider` 3.3.1) sends each piece of a streamed Llama 3.3 tool call twice, so the workout data arrived as broken JSON. The model now runs without streaming, and the result is replayed as a stream. The only newer provider version is a major release (4.0.0), which I didn't want to take on mid-assignment.
 - **Workouts were logged twice.** Seeing earlier turns, Llama re-logged old workouts and once printed a tool call as text. The model now gets only your latest message; the history comes from state through the tools.
 - **The review misread the stats.** It claimed PRs that didn't exist and invented "priority" lifts. The tools now hand back ready-made lists (PRs, priority lifts, volume trend in words) instead of raw flags.
 - I also changed the server to send real error messages instead of the AI SDK's default "An error occurred."
 
 **Known gaps:**
+
 - **Rare empty reply:** once in about 15 production requests, the model returned nothing. The next 8 identical requests all worked. I didn't add retry logic.
 - **Thin-data wording:** with only one session, the review can still say things like "volume increasing".
 - **No auth, and no way to edit or delete a logged entry.** Both are noted in the README.
@@ -425,16 +437,19 @@ commit everything and push it to a new public github repo called cloudflare-work
 **Claude:** Everything is committed and pushed to a new public repo: https://github.com/anishhh17/cloudflare-workout-planner (default branch `main`).
 
 **Work email kept out:**
+
 - **Commits:** both are authored and committed as `Anish Surendra <74033077+anishhh17@users.noreply.github.com>`, GitHub's private no-reply address for `anishhh17`. I checked the commits on GitHub after pushing, and the work email appears nowhere in the history.
 - **Initial commit rewritten:** the starter's initial commit had been made with your work email, so I rewrote its author and committer before pushing. That was safe because it had never been pushed anywhere.
 - **Identity is repo-only:** I set it in this repo's local git config. Your global git config still has the work email, so other repos are unaffected.
 
 **What was pushed:**
+
 - **Two commits:** the original starter scaffold, then the workout planner. The commit message ends with the Claude co-author line.
 - **Checked first:** I scanned the files for secrets and work identifiers. The only hit was a type definition in `env.d.ts`, which is harmless. `.env`, `.dev.vars` and `.wrangler` are ignored by git.
 - **Branch:** I renamed `master` to `main`.
 
 **Left behind on your machine:**
+
 - **`gh` account:** `anishhh17` was already logged in, so I made it the active account. It stays active, so future `gh` commands on this machine run as `anishhh17`. To switch back: `gh auth switch -u anishsurendratwid`.
 - **Local copies of the old commits:** the pre-rewrite versions stay in this repo's undo history (git's reflog) until git cleans them up. They were never pushed.
 
@@ -446,7 +461,7 @@ commit everything and push it to a new public github repo called cloudflare-work
 
 export this full session's transcript - every user message and your responses, including the starter debugging at the beginning - into PROMPT_HISTORY.md at the repo root. format it readably with timestamps or section markers. then add one line to the README under the requirements table: 'AI-assisted build - the full prompt history (including debugging) is in PROMPT_HISTORY.md'. commit and push.
 
-> *(Claude's reply was blocked by a safety classifier here, so the user re-sent the same request rephrased)*
+> _(Claude's reply was blocked by a safety classifier here, so the user re-sent the same request rephrased)_
 
 ---
 
@@ -456,7 +471,7 @@ export this full session's transcript - every user message and your responses, i
 
 export this full session's transcript - every user message and your responses, including the starter debugging at the beginning - into PROMPT_HISTORY.md at the repo root. format it readably with timestamps or section markers. then add one line to the README under the requirements table: 'AI-assisted build - the full prompt history (including debugging) is in PROMPT_HISTORY.md'. commit and push.
 
-> *(Claude's reply was blocked by a safety classifier here, so the user re-sent the same request rephrased)*
+> _(Claude's reply was blocked by a safety classifier here, so the user re-sent the same request rephrased)_
 
 ---
 
@@ -466,6 +481,6 @@ export this full session's transcript - every user message and your responses, i
 
 write PROMPT_HISTORY.md at the repo root documenting this build session: each prompt I gave you and what you did in response, from the starter debugging through deployment. readable sections. then add the README line linking to it, commit and push.
 
-> *(Claude's reply was blocked by a safety classifier here, so the user re-sent the same request rephrased)*
+> _(Claude's reply was blocked by a safety classifier here, so the user re-sent the same request rephrased)_
 
 ---
